@@ -1,10 +1,11 @@
 package one.digitalinnovation.gof.service.impl;
 
-import java.util.Optional;
-
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
+import one.digitalinnovation.gof.exception.BadRequestException;
+import one.digitalinnovation.gof.exception.ResourceNotFoundException;
+import one.digitalinnovation.gof.integration.viacep.ViaCepResponse;
 import one.digitalinnovation.gof.model.Cliente;
 import one.digitalinnovation.gof.model.ClienteRepository;
 import one.digitalinnovation.gof.model.Endereco;
@@ -22,13 +23,16 @@ import one.digitalinnovation.gof.service.ViaCepService;
 @Service
 public class ClienteServiceImpl implements ClienteService {
 
-	// Singleton: Injetar os componentes do Spring com @Autowired.
-	@Autowired
-	private ClienteRepository clienteRepository;
-	@Autowired
-	private EnderecoRepository enderecoRepository;
-	@Autowired
-	private ViaCepService viaCepService;
+	private final ClienteRepository clienteRepository;
+	private final EnderecoRepository enderecoRepository;
+	private final ViaCepService viaCepService;
+
+	public ClienteServiceImpl(ClienteRepository clienteRepository, EnderecoRepository enderecoRepository,
+			ViaCepService viaCepService) {
+		this.clienteRepository = clienteRepository;
+		this.enderecoRepository = enderecoRepository;
+		this.viaCepService = viaCepService;
+	}
 	
 	// Strategy: Implementar os métodos definidos na interface.
 	// Facade: Abstrair integrações com subsistemas, provendo uma interface simples.
@@ -42,42 +46,77 @@ public class ClienteServiceImpl implements ClienteService {
 	@Override
 	public Cliente buscarPorId(Long id) {
 		// Buscar Cliente por ID.
-		Optional<Cliente> cliente = clienteRepository.findById(id);
-		return cliente.get();
+		return clienteRepository.findById(id)
+				.orElseThrow(() -> new ResourceNotFoundException("Cliente não encontrado: id=" + id));
 	}
 
 	@Override
-	public void inserir(Cliente cliente) {
-		salvarClienteComCep(cliente);
+	@Transactional
+	public Cliente inserir(Cliente cliente) {
+		return salvarClienteComCep(cliente);
 	}
 
 	@Override
-	public void atualizar(Long id, Cliente cliente) {
+	@Transactional
+	public Cliente atualizar(Long id, Cliente cliente) {
 		// Buscar Cliente por ID, caso exista:
-		Optional<Cliente> clienteBd = clienteRepository.findById(id);
-		if (clienteBd.isPresent()) {
-			salvarClienteComCep(cliente);
-		}
+		clienteRepository.findById(id)
+				.orElseThrow(() -> new ResourceNotFoundException("Cliente não encontrado: id=" + id));
+		cliente.setId(id);
+		return salvarClienteComCep(cliente);
 	}
 
 	@Override
 	public void deletar(Long id) {
 		// Deletar Cliente por ID.
+		if (!clienteRepository.existsById(id)) {
+			throw new ResourceNotFoundException("Cliente não encontrado: id=" + id);
+		}
 		clienteRepository.deleteById(id);
 	}
 
-	private void salvarClienteComCep(Cliente cliente) {
+	private Cliente salvarClienteComCep(Cliente cliente) {
 		// Verificar se o Endereco do Cliente já existe (pelo CEP).
-		String cep = cliente.getEndereco().getCep();
+		String cep = extractAndNormalizeCep(cliente);
 		Endereco endereco = enderecoRepository.findById(cep).orElseGet(() -> {
 			// Caso não exista, integrar com o ViaCEP e persistir o retorno.
-			Endereco novoEndereco = viaCepService.consultarCep(cep);
+			ViaCepResponse viaCep = viaCepService.consultarCep(cep);
+			if (viaCep == null || Boolean.TRUE.equals(viaCep.getErro())) {
+				throw new BadRequestException("CEP inválido: " + cep);
+			}
+			Endereco novoEndereco = mapViaCepToEndereco(viaCep);
 			enderecoRepository.save(novoEndereco);
 			return novoEndereco;
 		});
 		cliente.setEndereco(endereco);
 		// Inserir Cliente, vinculando o Endereco (novo ou existente).
-		clienteRepository.save(cliente);
+		return clienteRepository.save(cliente);
+	}
+
+	private String extractAndNormalizeCep(Cliente cliente) {
+		if (cliente == null || cliente.getEndereco() == null || cliente.getEndereco().getCep() == null) {
+			throw new BadRequestException("Informe o endereço com o CEP");
+		}
+		String cep = cliente.getEndereco().getCep().replaceAll("\\D", "");
+		if (cep.length() != 8) {
+			throw new BadRequestException("cep deve conter 8 dígitos");
+		}
+		return cep;
+	}
+
+	private Endereco mapViaCepToEndereco(ViaCepResponse r) {
+		Endereco e = new Endereco();
+		e.setCep(r.getCep());
+		e.setLogradouro(r.getLogradouro());
+		e.setComplemento(r.getComplemento());
+		e.setBairro(r.getBairro());
+		e.setLocalidade(r.getLocalidade());
+		e.setUf(r.getUf());
+		e.setIbge(r.getIbge());
+		e.setGia(r.getGia());
+		e.setDdd(r.getDdd());
+		e.setSiafi(r.getSiafi());
+		return e;
 	}
 
 }
